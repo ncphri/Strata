@@ -9593,7 +9593,13 @@ int main(int argc, char** argv) {
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
                         "conversation_cache_min_free_mib=%lld conversation_cache_min_tokens=%lld "
-                        "tail_role_token=%lld vram_elastic=%d%s token_mask=2 engine=" STRATA_VERSION "\n",
+                        "tail_role_token=%lld vram_elastic=%d%s "
+#if defined(STRATA_GPU_METAL)
+                        "token_mask=1"   // the Metal window masks one row a window (no MTP window: no MKN, no 2)
+#else
+                        "token_mask=2"
+#endif
+                        " engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),

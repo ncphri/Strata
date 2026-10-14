@@ -170,6 +170,16 @@ The arena was 11.5-14.7 GB. Tokens per second, one token per step (no MTP), medi
   - against the HIP engine on a Radeon AI PRO R9700 (Q2_0), 36 of 39 first tokens are identical.
   - The differences are near-ties between the two best tokens, from a different floating-point order.
 
+## Constrained decoding (token mask)
+
+The server can constrain a turn (`json_schema` and friends) with a per-window token mask (`serve/constrain.py`). The
+Mac engine advertises `token_mask=1` in its INFO line: it masks one row per window - after the window runs, a pick the
+mask forbids is re-picked on the host, where the head's logits are already readable. The multi-row lookahead
+(`token_mask=2`, MKN) is not offered: the Mac window is one token, so there are no drafts to mask ahead.
+**Not verified on a real Mac.** This path was written and reviewed on Linux, where the Metal engine cannot build or
+run, so no macOS round-trip of a constrained `json_schema` turn has been measured. Until it is, treat constrained
+turns on the Mac as untested; the server validates the JSON after every turn either way.
+
 ## Limits (this version)
 
 - **Images (vision):** `--vision yes` in setup. Checked on one test picture with Q2_0 and UD-Q4_K_XL: the answers equal the HIP engine's, and text output is unchanged with vision on. No other tests yet.

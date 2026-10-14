@@ -78,6 +78,7 @@ bool window_init(void* w, const strata::core::ModelGeometry& g, strata::core::Se
 bool window_run(void* w, int T, const int32_t* tokens, int64_t pos0, bool head, int32_t* out, std::string& err);
 bool window_commit(void* w, int n_keep, std::string& err);
 bool window_copy_logits(void* w, int t, float* host);
+bool window_apply_mask(void* w, const uint32_t* words, int64_t n_words, int rows, int T, int32_t* out, std::string& err);
 }  // namespace strata::metal_engine
 #endif
 
@@ -2238,7 +2239,18 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
 #if defined(STRATA_GPU_METAL)
     (void) pool;
     (void) user;
-    return strata::metal_engine::window_run(metal_, T, tokens, pos0, head_sampling_, out, err);
+    if (!strata::metal_engine::window_run(metal_, T, tokens, pos0, head_sampling_, out, err)) return false;
+    // serve's token mask (token_mask.hpp): the Metal side of the 4-1/4-2 block below.  The Metal window is
+    // greedy and its head logits are host-readable (unified memory), so the mask's equivalent runs host-side
+    // AFTER the window: row t's logits out of the window, the tokens outside the mask forbidden, and out[t]
+    // re-picked to the masked argmax when the window's own pick falls outside.  No H2D write-back: on this
+    // backend the pick is made on the host, so rewriting out[] reaches everything downstream (the adoption
+    // loop, commit, the next window).  Metal has no MTP window, so an MKN answer keeps only its first row.
+    if (tmask_ != nullptr && n_vocab_ > 0) {
+        const int tmask_rows = std::min(tmask_rows_ > 0 ? tmask_rows_ : 1, T);   // 2-arg call: 1 row
+        if (!strata::metal_engine::window_apply_mask(metal_, tmask_, tmask_words_, tmask_rows, T, out, err)) return false;
+    }
+    return true;
 #endif
     using namespace strata::kernels;
     const OnDevice on_device(device_);

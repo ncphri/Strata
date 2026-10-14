@@ -21,6 +21,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/conversation_cache.hpp"
 #include "strata/core/session.hpp"
+#include "strata/core/token_mask.hpp"
 #include "strata/kernels/ngram.hpp"
 
 #include <algorithm>
@@ -120,6 +121,9 @@ public:
     bool commit(int n_keep, std::string& err);
     bool finish(int Tn, const int32_t* tokens, int64_t pos0, bool head, int32_t* out, double t0);
     bool copy_logits(int t, float* host) const;
+    // serve's token mask (token_mask.hpp): the host-side re-pick after a finished window, called from
+    // verify.cpp's Metal branch of Verifier::run (the 4-1/4-2 mask block's Metal equivalent).
+    bool apply_mask(const uint32_t* words, int64_t n_words, int rows, int T, int32_t* out, std::string& err);
     int64_t vocab() const { return n_vocab_; }
     bool ready() const { return cx_ != nullptr; }
     bool streaming() const { return stream_; }
@@ -294,6 +298,7 @@ public:
     }
 private:
     std::vector<float> ple_hist_;    // NG_HIST x hc_dim normalized rows, row-fastest
+    std::vector<float> mask_row_;    // apply_mask scratch: one window row of head logits
     bool ple_on_ = false;
     int last_T_ = 0;
     double last_gpu_ms_ = 0;
@@ -1965,6 +1970,39 @@ bool Window::copy_logits(int t, float* host) const {
     return true;
 }
 
+// serve's token mask (token_mask.hpp): the host-side equivalent of verify.cpp's 4-1/4-2 mask block for a finished
+// window.  The Metal window is greedy and its head logits are host-readable (unified memory), so the masked
+// re-pick completes here: read row t's logits, set every token outside the mask to kMaskedLogit, and when the
+// window's own pick falls outside the mask, take the masked argmax.  No write-back to the device: the pick is
+// made on the host, so rewriting out[] is enough for everything downstream.  An empty mask row is the CUDA path's
+// error.  A window encoded without the head returns -1 picks: they stay -1 (the caller discards them).
+bool Window::apply_mask(const uint32_t* words, int64_t n_words, int rows, int T, int32_t* out, std::string& err) {
+    int nrows = rows > 0 ? rows : 1;   // the old 2-arg set_token_mask call: 1 row
+    if (nrows > T) nrows = T;
+    mask_row_.resize((size_t) n_vocab_);
+    for (int t = 0; t < nrows; ++t) {
+        if (!copy_logits(t, mask_row_.data())) {
+            err = "verify: reading the head logits for the token mask failed";
+            return false;
+        }
+        const uint32_t* row = words + (int64_t) t * n_words;
+        if (strata::core::mask_apply_row(mask_row_.data(), n_vocab_, row, n_words) == 0) {
+            err = "verify: the token mask allows no token (row " + std::to_string(t) + ")";
+            return false;
+        }
+        if (out[t] < 0) continue;   // a window without the head: its picks are discarded
+        if (strata::core::mask_allows(row, n_words, out[t])) continue;
+        const int32_t best = strata::core::mask_argmax(mask_row_.data(), n_vocab_, row, n_words);
+        static bool said = false;
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "strata serve: token mask: row %d: the window picked %d outside the mask; took %d (the best allowed)\n", t, (int) out[t], (int) best);
+        }
+        out[t] = best;
+    }
+    return true;
+}
+
 
 // ================================================================================== prompts through the matrix units
 // A prompt chunk of T rows (mac-kern's tests/prompt_chain.cpp, on the engine's state): every dense matrix dequantized
@@ -2511,6 +2549,9 @@ bool window_commit(void* w, int n_keep, std::string& err) {
     return ok;
 }
 bool window_copy_logits(void* w, int t, float* host) { return ((Window*) w)->copy_logits(t, host); }
+bool window_apply_mask(void* w, const uint32_t* words, int64_t n_words, int rows, int T, int32_t* out, std::string& err) {
+    return ((Window*) w)->apply_mask(words, n_words, rows, T, out, err);
+}
 
 // the MTP hook (src/core/mtp.cpp under STRATA_GPU_METAL): the drafter lives beside the decode window it reads
 namespace {
