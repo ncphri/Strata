@@ -182,7 +182,7 @@ def grammar(rf: dict | None, with_tools: bool, vocab: Vocab, tool_names=None) ->
     `tool_names` (opt-in, T3a): when a non-empty list is given, the call's name sits behind a literal
     single-choice regex (only these names, with a maximal-munch lookahead) instead of being free; the body
     after the name stays the free REST, as always (the server's tool-call parser reads it, v3 lesson)."""
-    if rf is None:                                   # the bare-call grammar (STRATA_TOOL_MASK=1)
+    if rf is None or rf.get("type") == "bare":       # the bare-call grammar (STRATA_TOOL_MASK=1)
         if not with_tools:
             raise ValueError("the bare-call grammar needs tools")
         names = [n for n in (tool_names or []) if _NAME_SAFE.fullmatch(n)]
